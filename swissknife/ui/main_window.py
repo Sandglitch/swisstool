@@ -26,7 +26,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SwissKnife")
-        self.resize(1000, 700)
+        self.resize(1150, 750)
         self._tool_pages: dict[str, QWidget] = {}
         self._init_ui()
         self._populate_sidebar()

@@ -21,11 +21,11 @@ from PySide6.QtWidgets import (
 
 from ..core.tool import Tool, RunResult
 from ..core.runner import ToolWorker
-from .widgets import FileListWidget, ParamFormWidget, PresetWidget
+from .widgets import FileListWidget, ParamFormWidget, PresetWidget, ImagePreviewWidget
 
 
 class ToolPage(QWidget):
-    """Dynamic GUI page for an individual SwissKnife tool."""
+    """Dynamic GUI page for an individual SwissKnife tool with live Before & After preview."""
 
     def __init__(self, tool: Tool, parent: QWidget | None = None):
         super().__init__(parent)
@@ -59,7 +59,7 @@ class ToolPage(QWidget):
 
         main_layout.addWidget(header_widget)
 
-        # 2. Main content splitter (Files on left, Parameters on right)
+        # 2. Main content splitter (Files | Options | Preview)
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # Left panel: Files
@@ -67,24 +67,31 @@ class ToolPage(QWidget):
         files_layout = QVBoxLayout(files_box)
         self.file_list = FileListWidget(accepts=self.tool.accepts)
         self.file_list.files_changed.connect(self._on_files_changed)
+        self.file_list.file_selected.connect(self._on_file_selected)
         files_layout.addWidget(self.file_list)
         splitter.addWidget(files_box)
 
-        # Right panel: Parameters & Presets
+        # Center panel: Parameters & Presets
         params_box = QGroupBox("Options")
         params_layout = QVBoxLayout(params_box)
 
-        # Presets at the top of parameters
         self.param_form = ParamFormWidget(self.tool.params)
+        self.param_form.values_changed.connect(self._on_params_changed)
         self.preset_widget = PresetWidget(self.tool.id, self.param_form)
+        self.preset_widget.preset_loaded.connect(self._on_params_changed)
         params_layout.addWidget(self.preset_widget)
 
         params_layout.addWidget(self.param_form)
         params_layout.addStretch()
         splitter.addWidget(params_box)
 
+        # Right panel: Live Image Preview (Original and Changes)
+        self.preview_widget = ImagePreviewWidget(self.tool)
+        splitter.addWidget(self.preview_widget)
+
         splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 4)
         main_layout.addWidget(splitter, 2)
 
         # 3. Actions & Progress Bar
@@ -127,12 +134,20 @@ class ToolPage(QWidget):
         log_layout = QVBoxLayout(log_box)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setMaximumHeight(140)
+        self.log_view.setMaximumHeight(130)
         log_layout.addWidget(self.log_view)
         main_layout.addWidget(log_box, 1)
 
     def _on_files_changed(self, files: list[Path]) -> None:
         self.status_label.setText(f"{len(files)} file(s) selected.")
+        if not files:
+            self.preview_widget.set_file(None, self.param_form.get_values())
+
+    def _on_file_selected(self, file_path: Path | None) -> None:
+        self.preview_widget.set_file(file_path, self.param_form.get_values())
+
+    def _on_params_changed(self, params: dict) -> None:
+        self.preview_widget.update_params(params)
 
     def _execute(self, is_dry_run: bool) -> None:
         files = self.file_list.get_files()
@@ -214,4 +229,3 @@ class ToolPage(QWidget):
                 subprocess.Popen(["explorer", str(folder)])
             else:
                 subprocess.Popen(["xdg-open", str(folder)])
-

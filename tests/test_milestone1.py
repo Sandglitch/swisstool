@@ -184,8 +184,45 @@ def test_image_tools_execution():
     print("  All 7 Image Tools: PASSED")
 
 
+def test_image_previews():
+    print("[5/6] Testing Image Live Previews...")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        test_img_path = tmp_dir / "preview_sample.png"
+        sample = Image.new("RGB", (400, 300), color=(50, 100, 150))
+        sample.save(test_img_path)
+
+        # 1. Resize Preview
+        resize_tool = registry.get("image.resize")
+        prev_res = resize_tool.preview(test_img_path, {"mode": "Fit inside box", "width": 200, "height": 200, "keep_aspect": True})
+        assert prev_res is not None
+        assert prev_res.width == 200 and prev_res.height == 150
+        print("    Resize preview: OK (400x300 -> 200x150)")
+
+        # 2. Crop & Rotate Preview
+        crop_tool = registry.get("image.crop_rotate")
+        prev_rot = crop_tool.preview(test_img_path, {"rotation": "90° Clockwise", "flip": "None", "crop_mode": "None"})
+        assert prev_rot is not None
+        assert prev_rot.width == 300 and prev_rot.height == 400
+        print("    Rotate 90° CW preview: OK (400x300 -> 300x400)")
+
+        prev_sq = crop_tool.preview(test_img_path, {"rotation": "None", "flip": "None", "crop_mode": "Square (Center)"})
+        assert prev_sq is not None
+        assert prev_sq.width == 300 and prev_sq.height == 300
+        print("    Square crop preview: OK (400x300 -> 300x300)")
+
+        # 3. Watermark Preview
+        wm_tool = registry.get("image.watermark")
+        prev_wm = wm_tool.preview(test_img_path, {"text": "WATERMARK", "position": "Center", "font_size": 20, "opacity": 50, "color": "White"})
+        assert prev_wm is not None
+        assert prev_wm.size == (400, 300)
+        print("    Watermark preview: OK")
+
+    print("  Live Previews: PASSED")
+
+
 def test_ui_smoke():
-    print("[5/5] Testing UI Components (Offscreen)...")
+    print("[6/6] Testing UI Components & Preview Widget (Offscreen)...")
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
     from PySide6.QtWidgets import QApplication
@@ -200,6 +237,16 @@ def test_ui_smoke():
     assert "Images" in top_item.text(0)
     assert top_item.childCount() == 7
     print(f"  MainWindow instantiated successfully with active category '{top_item.text(0)}' and {top_item.childCount()} tools.")
+
+    # Test that tool page contains the image preview widget
+    resize_item = top_item.child(1)  # Resize Images
+    win.tree.setCurrentItem(resize_item)
+    active_page = win.stack.currentWidget()
+    assert hasattr(active_page, "preview_widget"), "ToolPage missing preview_widget"
+    assert active_page.preview_widget.orig_display is not None
+    assert active_page.preview_widget.prev_display is not None
+    print("  ToolPage ImagePreviewWidget verified successfully.")
+
     win.close()
     print("  UI Smoke Test: PASSED")
 
@@ -209,6 +256,7 @@ if __name__ == "__main__":
     test_naming_and_collision()
     test_presets()
     test_image_tools_execution()
+    test_image_previews()
     test_ui_smoke()
     print("\n=========================================")
     print(" ALL MILESTONE 1 TESTS PASSED SUCCESSFULLY! ")

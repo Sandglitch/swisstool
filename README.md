@@ -10,7 +10,7 @@ A local desktop toolbox for everyday file chores with a clean, barebones PySide6
   - Collision-safe output path generator (`swissknife.core.naming`), preventing accidental overwrites by default.
   - Background worker thread with cancellation, real-time progress reporting, and logging (`swissknife.core.runner`).
   - App settings & saveable presets management (`swissknife.core.settings`).
-  - Native Qt UI (`PySide6`) with category & tool sidebar, drag-and-drop file list table, dynamic parameter form generation, progress bar, log console, and preset manager.
+  - Native Qt UI (`PySide6`) with category & tool sidebar, drag-and-drop file list table, dynamic parameter form generation, progress bar, log console, preset manager, and a live image preview panel with Before & After side-by-side comparison.
 
 - **Image Tools**:
   1. **Convert Format (`image.convert`)**: PNG, JPEG, WebP, BMP, TIFF, GIF, ICO with quality and optimization control, transparency and mode handling.

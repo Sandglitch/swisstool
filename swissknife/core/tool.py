@@ -187,6 +187,10 @@ class Tool:
         """Dry-run preview. Returns a list of planned actions or file changes."""
         return []
 
+    def preview(self, file: Path, params: dict[str, Any]) -> Any | None:
+        """Generate a lightweight preview of changes for a single file. Returns a PIL Image or None."""
+        return None
+
     def run(self, files: list[Path], params: dict[str, Any], ctx: JobContext) -> RunResult:
         """Execute the batch tool operation."""
         raise NotImplementedError

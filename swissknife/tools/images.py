@@ -82,6 +82,16 @@ class ConvertImageTool(Tool):
         ext = ".jpg" if fmt == "jpeg" else f".{fmt}"
         return [f"{f.name} -> {ctx.out_path(f, ext=ext).name}" for f in files]
 
+    def preview(self, file: Path, params: dict[str, Any]) -> Image.Image | None:
+        try:
+            with _open_image_rgb_or_rgba(file) as img:
+                fmt_name = params.get("target_format", "PNG")
+                if fmt_name in ("JPEG", "BMP"):
+                    return _rgba_to_rgb(img)
+                return img.copy()
+        except Exception:
+            return None
+
     def run(self, files: list[Path], params: dict[str, Any], ctx: JobContext) -> RunResult:
         if not files:
             raise ToolError("No files selected to convert.")
@@ -156,6 +166,38 @@ class ResizeImageTool(Tool):
         w = params.get("width", 1280)
         h = params.get("height", 720)
         return [f"{f.name} -> {ctx.out_path(f, suffix='_resized').name} ({mode}: {w}x{h})" for f in files]
+
+    def preview(self, file: Path, params: dict[str, Any]) -> Image.Image | None:
+        try:
+            with _open_image_rgb_or_rgba(file) as img:
+                mode = params.get("mode", "Fit inside box")
+                target_w = int(params.get("width", 1280))
+                target_h = int(params.get("height", 720))
+                keep_aspect = bool(params.get("keep_aspect", True))
+                filter_choice = self._FILTERS.get(params.get("resample", ""), Image.Resampling.LANCZOS)
+
+                orig_w, orig_h = img.size
+
+                if mode == "Percentage":
+                    scale_x = target_w / 100.0
+                    scale_y = (target_w if keep_aspect else target_h) / 100.0
+                    new_w = max(1, int(orig_w * scale_x))
+                    new_h = max(1, int(orig_h * scale_y))
+                elif mode == "Fit inside box":
+                    ratio = min(target_w / orig_w, target_h / orig_h)
+                    new_w = max(1, int(orig_w * ratio))
+                    new_h = max(1, int(orig_h * ratio))
+                else:  # Exact dimensions
+                    if keep_aspect:
+                        ratio = min(target_w / orig_w, target_h / orig_h)
+                        new_w = max(1, int(orig_w * ratio))
+                        new_h = max(1, int(orig_h * ratio))
+                    else:
+                        new_w, new_h = target_w, target_h
+
+                return img.resize((new_w, new_h), filter_choice)
+        except Exception:
+            return None
 
     def run(self, files: list[Path], params: dict[str, Any], ctx: JobContext) -> RunResult:
         if not files:
@@ -233,6 +275,13 @@ class CompressImageTool(Tool):
         target = f"{params.get('target_kb', 300)} KB" if mode.startswith("Target") else f"Quality {params.get('quality', 75)}%"
         return [f"{f.name} ({f.stat().st_size // 1024} KB) -> {ctx.out_path(f, suffix='_compressed').name} [{target}]" for f in files if f.exists()]
 
+    def preview(self, file: Path, params: dict[str, Any]) -> Image.Image | None:
+        try:
+            with _open_image_rgb_or_rgba(file) as img:
+                return img.copy()
+        except Exception:
+            return None
+
     def run(self, files: list[Path], params: dict[str, Any], ctx: JobContext) -> RunResult:
         if not files:
             raise ToolError("No files selected to compress.")
@@ -255,32 +304,26 @@ class CompressImageTool(Tool):
                 fmt = img.format or "JPEG"
 
                 if mode == "Quality reduction":
-                    # Direct quality reduction
                     if fmt == "PNG":
-                        # Convert to palette mode with adaptive palette for real compression
                         p_img = img.convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
                         p_img.save(out, format="PNG", optimize=True)
                     else:
                         save_img = _rgba_to_rgb(img) if fmt == "JPEG" else img
                         save_img.save(out, format=fmt, quality=fixed_quality, optimize=True)
                 else:
-                    # Binary search / step search for target file size
                     if fmt == "PNG":
-                        # Try optimizing PNG first
                         buf = io.BytesIO()
                         img.save(buf, format="PNG", optimize=True)
                         if buf.tell() <= target_bytes:
                             with open(out, "wb") as f_out:
                                 f_out.write(buf.getvalue())
                         else:
-                            # Try 256 colors adaptive palette
                             buf = io.BytesIO()
                             p_img = img.convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
                             p_img.save(buf, format="PNG", optimize=True)
                             with open(out, "wb") as f_out:
                                 f_out.write(buf.getvalue())
                     else:
-                        # JPEG or WebP: binary search on quality [10..95]
                         save_img = _rgba_to_rgb(img) if fmt == "JPEG" else img
                         low, high = 10, 95
                         best_data: bytes | None = None
@@ -294,12 +337,11 @@ class CompressImageTool(Tool):
                             if size <= target_bytes:
                                 best_data = buf.getvalue()
                                 best_quality = mid
-                                low = mid + 1  # try higher quality
+                                low = mid + 1
                             else:
                                 high = mid - 1
 
                         if best_data is None:
-                            # Even quality 10 exceeds target size: downscale image progressively
                             curr_img = save_img
                             while curr_img.width > 200 and curr_img.height > 200:
                                 curr_img = curr_img.resize(
@@ -350,6 +392,75 @@ class CropRotateImageTool(Tool):
         rot = params.get("rotation", "None")
         crop = params.get("crop_mode", "None")
         return [f"{f.name} -> {ctx.out_path(f, suffix='_modified').name} (Rot: {rot}, Crop: {crop})" for f in files]
+
+    def preview(self, file: Path, params: dict[str, Any]) -> Image.Image | None:
+        try:
+            with _open_image_rgb_or_rgba(file) as img:
+                rotation = params.get("rotation", "None")
+                flip = params.get("flip", "None")
+                crop_mode = params.get("crop_mode", "None")
+                m_left = int(params.get("margin_left", 0))
+                m_top = int(params.get("margin_top", 0))
+                m_right = int(params.get("margin_right", 0))
+                m_bottom = int(params.get("margin_bottom", 0))
+
+                res = img
+
+                # 1. Orientation / Rotation
+                if rotation == "Auto-orient (from EXIF)":
+                    res = ImageOps.exif_transpose(res) or res
+                elif rotation == "90° Clockwise":
+                    res = res.rotate(270, expand=True)
+                elif rotation == "180°":
+                    res = res.rotate(180, expand=True)
+                elif rotation == "270° Clockwise":
+                    res = res.rotate(90, expand=True)
+
+                # 2. Flip
+                if flip == "Horizontal":
+                    res = res.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                elif flip == "Vertical":
+                    res = res.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+
+                # 3. Crop
+                w, h = res.size
+                if crop_mode in ("Square (Center)", "Aspect 1:1"):
+                    side = min(w, h)
+                    left = (w - side) // 2
+                    top = (h - side) // 2
+                    res = res.crop((left, top, left + side, top + side))
+
+                elif crop_mode == "Aspect 16:9":
+                    target_ratio = 16.0 / 9.0
+                    curr_ratio = w / h
+                    if curr_ratio > target_ratio:
+                        new_w = int(h * target_ratio)
+                        left = (w - new_w) // 2
+                        res = res.crop((left, 0, left + new_w, h))
+                    else:
+                        new_h = int(w / target_ratio)
+                        top = (h - new_h) // 2
+                        res = res.crop((0, top, w, top + new_h))
+
+                elif crop_mode == "Aspect 4:3":
+                    target_ratio = 4.0 / 3.0
+                    curr_ratio = w / h
+                    if curr_ratio > target_ratio:
+                        new_w = int(h * target_ratio)
+                        left = (w - new_w) // 2
+                        res = res.crop((left, 0, left + new_w, h))
+                    else:
+                        new_h = int(w / target_ratio)
+                        top = (h - new_h) // 2
+                        res = res.crop((0, top, w, top + new_h))
+
+                elif crop_mode == "Custom pixel margins":
+                    box = (m_left, m_top, max(m_left + 1, w - m_right), max(m_top + 1, h - m_bottom))
+                    res = res.crop(box)
+
+                return res.copy()
+        except Exception:
+            return None
 
     def run(self, files: list[Path], params: dict[str, Any], ctx: JobContext) -> RunResult:
         if not files:
@@ -448,6 +559,13 @@ class ExifTool(Tool):
         Choice("action", "Action", ["View metadata", "Strip all metadata", "Remove GPS tags only"], default="View metadata"),
     ]
 
+    def preview(self, file: Path, params: dict[str, Any]) -> Image.Image | None:
+        try:
+            with _open_image_rgb_or_rgba(file) as img:
+                return img.copy()
+        except Exception:
+            return None
+
     def run(self, files: list[Path], params: dict[str, Any], ctx: JobContext) -> RunResult:
         if not files:
             raise ToolError("No files selected.")
@@ -472,7 +590,6 @@ class ExifTool(Tool):
                         has_tags = False
                         for tag_id, value in exif.items():
                             tag_name = TAGS.get(tag_id, str(tag_id))
-                            # Ignore raw binary blobs in display
                             if isinstance(value, bytes) and len(value) > 32:
                                 value = f"<{len(value)} bytes binary>"
                             log_lines.append(f"  {tag_name}: {value}")
@@ -483,7 +600,6 @@ class ExifTool(Tool):
 
                 elif action == "Strip all metadata":
                     out = ctx.out_path(src, suffix="_stripped")
-                    # Open raw pixel data and save without passing exif
                     data = list(img.getdata())
                     clean_img = Image.new(img.mode, img.size)
                     clean_img.putdata(data)
@@ -493,7 +609,7 @@ class ExifTool(Tool):
 
                 elif action == "Remove GPS tags only":
                     out = ctx.out_path(src, suffix="_no_gps")
-                    if 0x8825 in exif:  # GPSInfo tag ID
+                    if 0x8825 in exif:
                         del exif[0x8825]
                     img.save(out, exif=exif)
                     outputs.append(out)
@@ -548,6 +664,65 @@ class WatermarkImageTool(Tool):
             return ImageFont.load_default(size=size)
         except Exception:
             return ImageFont.load_default()
+
+    def preview(self, file: Path, params: dict[str, Any]) -> Image.Image | None:
+        try:
+            with _open_image_rgb_or_rgba(file) as img:
+                watermark_text = params.get("text", "CONFIDENTIAL").strip()
+                if not watermark_text:
+                    return img.copy()
+
+                pos_choice = params.get("position", "Bottom-right")
+                font_size = int(params.get("font_size", 36))
+                opacity_pct = int(params.get("opacity", 40))
+                alpha = int(255 * (opacity_pct / 100.0))
+                color_choice = params.get("color", "White")
+                margin = int(params.get("margin", 24))
+
+                if color_choice == "Custom Hex":
+                    hex_str = params.get("custom_hex", "#FFFFFF").strip().lstrip("#")
+                    if len(hex_str) == 6:
+                        r, g, b = int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16)
+                    else:
+                        r, g, b = 255, 255, 255
+                else:
+                    r, g, b = self._COLOR_MAP.get(color_choice, (255, 255, 255))
+
+                fill_color = (r, g, b, alpha)
+                font = self._get_font(font_size)
+
+                base = img.convert("RGBA")
+                overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
+                draw = ImageDraw.Draw(overlay)
+
+                bbox = draw.textbbox((0, 0), watermark_text, font=font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+                w, h = base.size
+
+                if pos_choice == "Tiled across image":
+                    step_x = tw + margin * 3
+                    step_y = th + margin * 3
+                    for x in range(margin, w, max(1, step_x)):
+                        for y in range(margin, h, max(1, step_y)):
+                            draw.text((x, y), watermark_text, font=font, fill=fill_color)
+                else:
+                    if pos_choice == "Bottom-right":
+                        x, y = w - tw - margin, h - th - margin
+                    elif pos_choice == "Bottom-left":
+                        x, y = margin, h - th - margin
+                    elif pos_choice == "Top-right":
+                        x, y = w - tw - margin, margin
+                    elif pos_choice == "Top-left":
+                        x, y = margin, margin
+                    else:  # Center
+                        x, y = (w - tw) // 2, (h - th) // 2
+
+                    draw.text((x, y), watermark_text, font=font, fill=fill_color)
+
+                return Image.alpha_composite(base, overlay)
+        except Exception:
+            return None
 
     def run(self, files: list[Path], params: dict[str, Any], ctx: JobContext) -> RunResult:
         if not files:
@@ -664,6 +839,25 @@ class FaviconIcoTool(Tool):
         sizes = params.get("sizes", "Standard (16, 32, 48)")
         return [f"{f.name} -> {ctx.out_path(f, ext='.ico').name} ({sizes})" for f in files]
 
+    def preview(self, file: Path, params: dict[str, Any]) -> Image.Image | None:
+        try:
+            with _open_image_rgb_or_rgba(file) as img:
+                img_rgba = img.convert("RGBA")
+                max_dim = 128
+                fit_mode = params.get("fit", "Fit inside square (keep aspect)")
+                if fit_mode == "Stretch to square":
+                    return img_rgba.resize((max_dim, max_dim), Image.Resampling.LANCZOS)
+                else:
+                    master = Image.new("RGBA", (max_dim, max_dim), (0, 0, 0, 0))
+                    w, h = img_rgba.size
+                    scale = min(max_dim / w, max_dim / h)
+                    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+                    scaled = img_rgba.resize((nw, nh), Image.Resampling.LANCZOS)
+                    master.paste(scaled, ((max_dim - nw) // 2, (max_dim - nh) // 2))
+                    return master
+        except Exception:
+            return None
+
     def run(self, files: list[Path], params: dict[str, Any], ctx: JobContext) -> RunResult:
         if not files:
             raise ToolError("No files selected to generate favicon.")
@@ -686,7 +880,6 @@ class FaviconIcoTool(Tool):
                 if fit_mode == "Stretch to square":
                     master = img_rgba.resize((max_dim, max_dim), Image.Resampling.LANCZOS)
                 else:
-                    # Fit inside square with transparent padding
                     master = Image.new("RGBA", (max_dim, max_dim), (0, 0, 0, 0))
                     w, h = img_rgba.size
                     scale = min(max_dim / w, max_dim / h)
@@ -701,4 +894,3 @@ class FaviconIcoTool(Tool):
 
         ctx.progress(total, total, "Finished generating icons.")
         return RunResult(outputs=outputs, message=f"Generated {len(outputs)} ICO file(s).")
-

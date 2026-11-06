@@ -5,8 +5,10 @@ import fnmatch
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QColor
+from PIL import Image
+
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QColor, QPixmap, QImage
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -27,10 +29,27 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QInputDialog,
     QMessageBox,
+    QSplitter,
+    QGroupBox,
 )
 
-from ..core.tool import Param
+from ..core.tool import Tool, Param
 from ..core.settings import settings
+
+
+def pil_to_pixmap(im: Image.Image) -> QPixmap:
+    """Convert a PIL Image directly to a QPixmap in memory."""
+    if im.mode == "RGBA":
+        data = im.tobytes("raw", "RGBA")
+        qim = QImage(data, im.width, im.height, QImage.Format.Format_RGBA8888)
+    elif im.mode == "RGB":
+        data = im.tobytes("raw", "RGB")
+        qim = QImage(data, im.width, im.height, im.width * 3, QImage.Format.Format_RGB888)
+    else:
+        rgb = im.convert("RGBA")
+        data = rgb.tobytes("raw", "RGBA")
+        qim = QImage(data, rgb.width, rgb.height, QImage.Format.Format_RGBA8888)
+    return QPixmap.fromImage(qim)
 
 
 # =============================================================================
@@ -41,6 +60,7 @@ class FileListWidget(QWidget):
     """File table supporting drag-and-drop, individual file selection, and folder scanning."""
 
     files_changed = Signal(list)
+    file_selected = Signal(object)  # Path or None
 
     def __init__(self, accepts: list[str] | None = None, parent: QWidget | None = None):
         super().__init__(parent)
@@ -64,6 +84,8 @@ class FileListWidget(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
         self.table.setAcceptDrops(True)
         self.setAcceptDrops(True)
         layout.addWidget(self.table)
@@ -139,8 +161,22 @@ class FileListWidget(QWidget):
                 self._files.pop(r)
         self._refresh_table()
         self.files_changed.emit(self._files)
+        if self._files:
+            self.table.selectRow(0)
+        else:
+            self.file_selected.emit(None)
+
+    def _on_table_selection_changed(self) -> None:
+        selected = self.table.selectedIndexes()
+        if selected:
+            row = selected[0].row()
+            if 0 <= row < len(self._files):
+                self.file_selected.emit(self._files[row])
+                return
+        self.file_selected.emit(None)
 
     def add_paths(self, paths: list[Path]) -> None:
+        had_files = len(self._files) > 0
         added = False
         for p in paths:
             if p.is_file() and self._matches_filter(p) and p not in self._files:
@@ -149,11 +185,14 @@ class FileListWidget(QWidget):
         if added:
             self._refresh_table()
             self.files_changed.emit(self._files)
+            if not had_files and self.table.rowCount() > 0:
+                self.table.selectRow(0)
 
     def clear_files(self) -> None:
         self._files.clear()
         self._refresh_table()
         self.files_changed.emit(self._files)
+        self.file_selected.emit(None)
 
     def _refresh_table(self) -> None:
         self.table.setRowCount(len(self._files))
@@ -177,6 +216,14 @@ class FileListWidget(QWidget):
     def get_files(self) -> list[Path]:
         return list(self._files)
 
+    def get_selected_file(self) -> Path | None:
+        selected = self.table.selectedIndexes()
+        if selected:
+            row = selected[0].row()
+            if 0 <= row < len(self._files):
+                return self._files[row]
+        return self._files[0] if self._files else None
+
 
 # =============================================================================
 # 2. Dynamic Parameter Form Widget
@@ -184,6 +231,8 @@ class FileListWidget(QWidget):
 
 class ParamFormWidget(QWidget):
     """Renders declarative Param items into standard Qt input controls."""
+
+    values_changed = Signal(dict)
 
     def __init__(self, params: list[Param], parent: QWidget | None = None):
         super().__init__(parent)
@@ -204,6 +253,9 @@ class ParamFormWidget(QWidget):
                 widget.setToolTip(p.help)
             layout.addRow(label, widget)
 
+    def _emit_changed(self) -> None:
+        self.values_changed.emit(self.get_values())
+
     def _create_control_for_param(self, p: Param) -> QWidget:
         if p.kind == "choice":
             combo = QComboBox()
@@ -213,6 +265,7 @@ class ParamFormWidget(QWidget):
                 idx = combo.findData(p.default)
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
+            combo.currentIndexChanged.connect(self._emit_changed)
             return combo
 
         elif p.kind == "int":
@@ -225,6 +278,7 @@ class ParamFormWidget(QWidget):
                 spin.setSuffix(f" {p.suffix}")
             if p.default is not None:
                 spin.setValue(int(p.default))
+            spin.valueChanged.connect(self._emit_changed)
             return spin
 
         elif p.kind == "float":
@@ -237,11 +291,13 @@ class ParamFormWidget(QWidget):
                 dspin.setSuffix(f" {p.suffix}")
             if p.default is not None:
                 dspin.setValue(float(p.default))
+            dspin.valueChanged.connect(self._emit_changed)
             return dspin
 
         elif p.kind == "bool":
             check = QCheckBox()
             check.setChecked(bool(p.default))
+            check.toggled.connect(self._emit_changed)
             return check
 
         elif p.kind == "multiline":
@@ -251,6 +307,7 @@ class ParamFormWidget(QWidget):
                 tedit.setPlaceholderText(p.placeholder)
             if p.default:
                 tedit.setPlainText(str(p.default))
+            tedit.textChanged.connect(self._emit_changed)
             return tedit
 
         elif p.kind == "color":
@@ -258,6 +315,7 @@ class ParamFormWidget(QWidget):
             h_layout = QHBoxLayout(container)
             h_layout.setContentsMargins(0, 0, 0, 0)
             line = QLineEdit(str(p.default or "#FFFFFF"))
+            line.textChanged.connect(self._emit_changed)
             btn_pick = QPushButton("Pick...")
 
             def on_pick():
@@ -277,6 +335,7 @@ class ParamFormWidget(QWidget):
                 line.setPlaceholderText(p.placeholder)
             if p.default:
                 line.setText(str(p.default))
+            line.textChanged.connect(self._emit_changed)
             return line
 
     def get_values(self) -> dict[str, Any]:
@@ -408,3 +467,178 @@ class PresetWidget(QWidget):
             settings.delete_preset(self.tool_id, name)
             self.refresh_presets()
 
+
+# =============================================================================
+# 4. Scalable Image Label
+# =============================================================================
+
+class ScalableImageLabel(QLabel):
+    """A QLabel that automatically scales its pixmap smoothly to fit its dimensions while preserving aspect ratio."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._pixmap: QPixmap | None = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumSize(100, 100)
+        self.setStyleSheet("background: #f7f7f7; border: 1px solid #ddd; border-radius: 4px;")
+
+    def set_pixmap(self, pixmap: QPixmap | None) -> None:
+        self._pixmap = pixmap
+        self._update_display()
+
+    def _update_display(self) -> None:
+        if self._pixmap and not self._pixmap.isNull():
+            w = max(10, self.width() - 8)
+            h = max(10, self.height() - 8)
+            scaled = self._pixmap.scaled(
+                w,
+                h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            super().setPixmap(scaled)
+        else:
+            super().clear()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_display()
+
+
+# =============================================================================
+# 5. Image Preview Widget (Side-by-Side Before & After)
+# =============================================================================
+
+class ImagePreviewWidget(QGroupBox):
+    """Panel showing the image being worked on and real-time preview of changes."""
+
+    def __init__(self, tool: Tool, parent: QWidget | None = None):
+        super().__init__("Image Preview", parent)
+        self.tool = tool
+        self._current_file: Path | None = None
+        self._current_params: dict[str, Any] = {}
+        self._orig_pixmap: QPixmap | None = None
+
+        # Debounce timer to prevent lag when rapidly tweaking controls
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(120)
+        self._debounce_timer.timeout.connect(self._render_preview)
+
+        self._init_ui()
+
+    def _init_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Top Bar: File info + View mode selector
+        top_bar = QHBoxLayout()
+        self.lbl_filename = QLabel("No image selected.")
+        self.lbl_filename.setStyleSheet("font-weight: bold; color: #333;")
+        top_bar.addWidget(self.lbl_filename, 1)
+
+        top_bar.addWidget(QLabel("View:"))
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItem("Side-by-Side (Before & After)")
+        self.combo_mode.addItem("Preview (Changes Only)")
+        self.combo_mode.addItem("Original Only")
+        self.combo_mode.currentIndexChanged.connect(self._on_view_mode_changed)
+        top_bar.addWidget(self.combo_mode)
+        layout.addLayout(top_bar)
+
+        # Splitter holding the Before and After views
+        self.view_splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # 1. Left container: Original Image
+        self.orig_container = QWidget()
+        orig_layout = QVBoxLayout(self.orig_container)
+        orig_layout.setContentsMargins(0, 0, 0, 0)
+        orig_layout.setSpacing(2)
+        self.lbl_orig_info = QLabel("Original")
+        self.lbl_orig_info.setStyleSheet("color: #666; font-size: 11px;")
+        self.orig_display = ScalableImageLabel()
+        orig_layout.addWidget(self.lbl_orig_info)
+        orig_layout.addWidget(self.orig_display, 1)
+        self.view_splitter.addWidget(self.orig_container)
+
+        # 2. Right container: Preview Changes
+        self.prev_container = QWidget()
+        prev_layout = QVBoxLayout(self.prev_container)
+        prev_layout.setContentsMargins(0, 0, 0, 0)
+        prev_layout.setSpacing(2)
+        self.lbl_prev_info = QLabel("Preview (Changes)")
+        self.lbl_prev_info.setStyleSheet("color: #0b6623; font-weight: bold; font-size: 11px;")
+        self.prev_display = ScalableImageLabel()
+        prev_layout.addWidget(self.lbl_prev_info)
+        prev_layout.addWidget(self.prev_display, 1)
+        self.view_splitter.addWidget(self.prev_container)
+
+        self.view_splitter.setStretchFactor(0, 1)
+        self.view_splitter.setStretchFactor(1, 1)
+        layout.addWidget(self.view_splitter, 1)
+
+    def _on_view_mode_changed(self, index: int) -> None:
+        if index == 0:  # Side-by-Side
+            self.orig_container.setVisible(True)
+            self.prev_container.setVisible(True)
+        elif index == 1:  # Changes Only
+            self.orig_container.setVisible(False)
+            self.prev_container.setVisible(True)
+        else:  # Original Only
+            self.orig_container.setVisible(True)
+            self.prev_container.setVisible(False)
+
+    def set_file(self, file_path: Path | None, current_params: dict[str, Any]) -> None:
+        """Set the active file being inspected."""
+        self._current_file = file_path
+        self._current_params = current_params
+
+        if not file_path or not file_path.exists():
+            self.lbl_filename.setText("No image selected.")
+            self.lbl_orig_info.setText("Original")
+            self.lbl_prev_info.setText("Preview (Changes)")
+            self.orig_display.set_pixmap(None)
+            self.prev_display.set_pixmap(None)
+            return
+
+        self.lbl_filename.setText(f"File: {file_path.name}")
+
+        # Load Original
+        try:
+            with Image.open(file_path) as im:
+                sz = file_path.stat().st_size
+                sz_str = f"{sz // 1024} KB" if sz > 1024 else f"{sz} B"
+                self.lbl_orig_info.setText(f"Original: {im.width} × {im.height} px ({sz_str})")
+                self._orig_pixmap = pil_to_pixmap(im)
+                self.orig_display.set_pixmap(self._orig_pixmap)
+        except Exception as e:
+            self.lbl_orig_info.setText("Original: (Unable to load image)")
+            self.orig_display.set_pixmap(None)
+
+        self._debounce_timer.start()
+
+    def update_params(self, params: dict[str, Any]) -> None:
+        """Called when user changes parameter form options."""
+        self._current_params = params
+        if self._current_file:
+            self._debounce_timer.start()
+
+    def _render_preview(self) -> None:
+        """Generate and update the preview image."""
+        if not self._current_file or not self._current_file.exists():
+            return
+
+        try:
+            preview_im = self.tool.preview(self._current_file, self._current_params)
+            if preview_im is not None:
+                pix = pil_to_pixmap(preview_im)
+                self.prev_display.set_pixmap(pix)
+                self.lbl_prev_info.setText(f"Preview: {preview_im.width} × {preview_im.height} px")
+            else:
+                # If tool didn't modify pixel data, fall back to original
+                self.prev_display.set_pixmap(self._orig_pixmap)
+                self.lbl_prev_info.setText("Preview: (No visual preview changes)")
+        except Exception as e:
+            self.lbl_prev_info.setText(f"Preview error: {e}")
+            self.prev_display.set_pixmap(None)
